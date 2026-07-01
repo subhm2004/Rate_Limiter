@@ -2,11 +2,30 @@
 
 # ⏱️ Rate Limiter
 
+[![CI](https://github.com/subhm2004/Rate_Limiter/actions/workflows/ci.yml/badge.svg)](https://github.com/subhm2004/Rate_Limiter/actions/workflows/ci.yml)
+![C++17](https://img.shields.io/badge/C%2B%2B-17-00599C?logo=cplusplus&logoColor=white)
+![Node.js](https://img.shields.io/badge/Node.js-Express-339933?logo=nodedotjs&logoColor=white)
+![Next.js](https://img.shields.io/badge/Next.js-15-000000?logo=nextdotjs&logoColor=white)
+![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)
+
 ### A full-stack, thread-safe rate limiter with five algorithms
 
 **Node.js (Express) backend** whose algorithms are written in **C++** and loaded as a native **N-API addon** · **Next.js frontend** (animated simulator) · **One-command dev workflow** (`npm run dev`)
 
 </div>
+
+---
+
+## Preview
+
+|  |  |
+|---|---|
+| ![Landing page](docs/screenshots/landing.png) | ![Compare mode](docs/screenshots/compare.png) |
+
+**The simulator** — packets fly from the client to the gate, the C++ engine decides, and the
+mechanism (tokens, water, windows) animates in real time:
+
+![Simulator](docs/screenshots/simulator.png)
 
 ---
 

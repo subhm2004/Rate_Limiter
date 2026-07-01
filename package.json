@@ -2,7 +2,7 @@
   "name": "rate-limiter",
   "version": "1.0.0",
   "private": true,
-  "description": "Full-stack rate limiter — Node.js server with C++ (N-API) algorithms + Next.js frontend, nine algorithms.",
+  "description": "Full-stack rate limiter — Node.js server with C++ (N-API) algorithms + Next.js frontend, five algorithms.",
   "scripts": {
     "dev": "node scripts/dev.mjs",
     "dev:clean": "rm -rf frontend/.next frontend/node_modules/.cache && node scripts/dev.mjs",
@@ -14,6 +14,11 @@
     "test": "make -C backend test",
     "clean": "make -C backend clean && rm -rf frontend/.next backend/build backend/node_modules frontend/node_modules"
   },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/subhm2004/Rate_Limiter.git"
+  },
+  "homepage": "https://github.com/subhm2004/Rate_Limiter#readme",
   "engines": {
     "node": ">=18"
   },
