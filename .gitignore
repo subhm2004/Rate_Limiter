@@ -1,0 +1,11 @@
+backend/build/
+*.o
+*.out
+.DS_Store
+
+# Next.js / frontend
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+node_modules/
+npm-debug.log*

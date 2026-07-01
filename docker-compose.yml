@@ -1,0 +1,22 @@
+# One command to run the whole thing without any local toolchain:
+#   docker compose up --build
+# then open http://localhost:3000
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    ports:
+      - "8080:8080"
+
+  frontend:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+    environment:
+      # Next.js proxies /api/* here (see frontend/next.config.mjs)
+      - BACKEND_URL=http://backend:8080
+    ports:
+      - "3000:3000"
+    depends_on:
+      - backend
