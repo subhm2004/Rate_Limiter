@@ -123,6 +123,14 @@ about them.
   rewrite, so the browser only ever talks to one origin.
 - ✅ **Live throughput chart** — a real-time graph of allowed vs denied requests
   per second.
+- ✅ **Built-in benchmark** — fire hundreds of requests at every algorithm and
+  compare allow-rate, throughput and p99 latency in a results table.
+- ✅ **C++ source viewer** — read the actual engine header for the selected
+  algorithm, syntax-highlighted, served straight from the repo.
+- ✅ **Real API semantics** — denials return **429** with `Retry-After`, and every
+  response carries `X-RateLimit-*` headers.
+- ✅ **CI** — GitHub Actions runs the C++ test suite, builds the native addon,
+  smoke-tests the API and builds the frontend on every push.
 - ✅ **Traffic presets + latency badge** — one-click Steady / Bursty / DDoS-spike
   load, and a “served by C++ in X ms” round-trip readout proving the real backend.
 - ✅ **Runs with Docker** — `docker compose up` brings up both services; no local
@@ -297,6 +305,7 @@ All scripts are defined in the root `package.json` and run from the project root
 | Script                   | What it does |
 |--------------------------|--------------|
 | `npm run dev`            | Build backend, install frontend deps (first run), run **both** servers together. The main entry point. |
+| `npm run dev:clean`      | Same as `dev`, but first wipes the Next.js caches (`frontend/.next` + `node_modules/.cache`) — use when the UI serves stale/broken bundles. |
 | `npm run build`          | Production build of **both**: compiles the backend and runs `next build`. |
 | `npm run build:backend`  | Compile the C++ backend only. |
 | `npm run build:frontend` | Install deps and run `next build` for the frontend only. |
@@ -636,6 +645,22 @@ The Node (Express) server speaks JSON over plain `GET` requests (so everything i
 | `GET /api/check?algo=<id>&key=<k>&cost=<n>` | Run one request through an algorithm; returns a `Decision` as JSON. `cost` defaults to 1. |
 | `GET /api/config?algo=<id>&p1=<a>&p2=<b>` | Reconfigure one algorithm (clears that algorithm's state). |
 | `GET /api/reset` | Clear all per-key state across every algorithm. |
+| `GET /api/source?algo=<id>` | The actual C++ header implementing that algorithm (powers the UI's source viewer). |
+
+**Real-world response semantics.** `/api/check` behaves like a production API:
+allowed requests return **200**, denied ones return **429 Too Many Requests**, and
+every response carries standard headers — `X-RateLimit-Limit`,
+`X-RateLimit-Remaining`, and `Retry-After` (on 429):
+
+```bash
+curl -sD - "http://localhost:8080/api/check?algo=token_bucket&key=demo" -o /dev/null
+# HTTP/1.1 200 OK
+# X-RateLimit-Limit: 10
+# X-RateLimit-Remaining: 9
+# ...after the bucket is drained:
+# HTTP/1.1 429 Too Many Requests
+# Retry-After: 1
+```
 
 `algo` is one of: `token_bucket`, `leaking_bucket`, `fixed_window`,
 `sliding_window_log`, `sliding_window_counter`.

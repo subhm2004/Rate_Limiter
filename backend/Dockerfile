@@ -15,6 +15,7 @@ FROM node:20-slim
 WORKDIR /app/backend
 COPY --from=build /app/backend/node_modules ./node_modules
 COPY --from=build /app/backend/build ./build
+COPY --from=build /app/backend/include ./include
 COPY backend/server.js ./
 EXPOSE 8080
 CMD ["node", "server.js"]

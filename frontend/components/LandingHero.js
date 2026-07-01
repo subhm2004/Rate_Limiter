@@ -86,7 +86,8 @@ export default function LandingHero() {
       } else { p.x += (dx / d) * stp; p.y += (dy / d) * stp; }
       if (p.done) p.alpha -= dt * 2.4;
     }
-    s.packets = s.packets.filter((p) => p.alpha > 0 && s.packets.length < 200);
+    s.packets = s.packets.filter((p) => p.alpha > 0);
+    if (s.packets.length > 200) s.packets = s.packets.slice(-200); // hard cap
   }
 
   function draw(ctx) {
@@ -110,11 +111,13 @@ export default function LandingHero() {
 
     // bucket
     const bw = 150, bh = 150, bx = cx - bw / 2, by = cy - bh / 2;
-    // refill pipe + drip
+    // refill pipe + drip (only while the bucket actually has room)
     ctx.strokeStyle = C.ok; ctx.lineWidth = 4;
     ctx.beginPath(); ctx.moveTo(cx, by - 46); ctx.lineTo(cx, by - 6); ctx.stroke();
-    const dy = by - 44 + ((s.drip * REFILL * 22) % 34);
-    ctx.beginPath(); ctx.arc(cx, dy, 4, 0, 7); ctx.fillStyle = C.ok; ctx.fill();
+    if (s.tokens < CAP - 0.01) {
+      const dy = by - 44 + ((s.drip * REFILL * 22) % 34);
+      ctx.beginPath(); ctx.arc(cx, dy, 4, 0, 7); ctx.fillStyle = C.ok; ctx.fill();
+    }
 
     roundRect(ctx, bx, by, bw, bh, 14);
     ctx.fillStyle = "rgba(255,255,255,0.02)"; ctx.fill();

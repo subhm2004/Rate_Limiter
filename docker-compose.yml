@@ -13,9 +13,10 @@ services:
     build:
       context: .
       dockerfile: frontend/Dockerfile
-    environment:
-      # Next.js proxies /api/* here (see frontend/next.config.mjs)
-      - BACKEND_URL=http://backend:8080
+      args:
+        # Next.js bakes the /api/* proxy target at BUILD time, so it must be a
+        # build arg (a runtime env var would be ignored by `next start`).
+        BACKEND_URL: http://backend:8080
     ports:
       - "3000:3000"
     depends_on:

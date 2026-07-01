@@ -1,11 +1,20 @@
-backend/build/
-*.o
-*.out
-.DS_Store
-
-# Next.js / frontend
+# dependencies
+node_modules/
 frontend/node_modules/
+backend/node_modules/
+
+# builds
 frontend/.next/
 frontend/out/
-node_modules/
+backend/build/
+backend/build-cpp/
+*.o
+*.out
+
+# local env overrides (the committed frontend/.env is intentional)
+*.env.local
+.env.*.local
+
+# misc
+.DS_Store
 npm-debug.log*

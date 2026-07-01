@@ -1,4 +1,6 @@
 /** @type {import('next').NextConfig} */
+// BACKEND_URL is read from frontend/.env (or a real environment variable).
+// Set it to your deployed backend URL before deploying the frontend.
 const BACKEND = process.env.BACKEND_URL || "http://localhost:8080";
 
 const nextConfig = {

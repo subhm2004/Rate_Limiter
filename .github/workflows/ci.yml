@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  cpp-tests:
+    name: C++ unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run the algorithm test suite
+        run: make -C backend test
+
+  backend:
+    name: Native addon + API smoke test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Install deps & build the N-API addon
+        run: npm install --prefix backend
+      - name: Smoke-test the API
+        run: |
+          node backend/server.js &
+          sleep 2
+          curl -sf localhost:8080/api/meta | grep token_bucket
+          curl -sf "localhost:8080/api/check?algo=token_bucket&key=ci" | grep '"allowed":true'
+          curl -sf "localhost:8080/api/source?algo=token_bucket" | grep RL_TOKEN_BUCKET_H
+
+  frontend:
+    name: Next.js build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Install deps
+        run: npm install --prefix frontend
+      - name: Build
+        run: npm run build --prefix frontend

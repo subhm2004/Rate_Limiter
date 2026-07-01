@@ -1,6 +1,8 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import Benchmark from "./Benchmark";
+import CppSource from "./CppSource";
 
 // ---------------------------------------------------------------------------
 // Algorithm metadata (labels + defaults). The actual allow/deny decision always
@@ -168,6 +170,7 @@ export default function Simulator() {
   const [latency, setLatency] = useState(null); // last round-trip ms to the C++ backend
   const [preset, setPreset] = useState(null);   // active traffic preset
   const [cost, setCost] = useState(1);          // cost-weighted: units per request
+  const [log, setLog] = useState([]);           // decision log (newest first)
 
   const canvasRef = useRef(null);
   const sizeRef = useRef({ w: 800, h: 480 });
@@ -175,12 +178,14 @@ export default function Simulator() {
   const mechRef = useRef(null);
   const packetsRef = useRef([]);
   const pulsesRef = useRef([]);
+  const shardsRef = useRef([]); // debris burst when a decision lands at the gate
   const idRef = useRef(0);
   const autoTimerRef = useRef(null);
   const cfgTimerRef = useRef(null);
   // live throughput chart
   const chartRef = useRef(null);
   const chartSizeRef = useRef({ w: 800, h: 160 });
+  const chartMouseRef = useRef(null); // hover position for the chart tooltip
   const secRef = useRef({ a: 0, d: 0 });   // counts in the current second
   const historyRef = useRef([]);           // [{a, d}] per past second
   const presetTimerRef = useRef([]);       // active preset interval ids
@@ -206,9 +211,16 @@ export default function Simulator() {
       flash: 0,             // window-reset flash timer
       parts: [],            // particles: refill drops, leak drops, consumed tokens
       refillAcc: 0, leakAcc: 0, // spawn accumulators (rate-based)
+      fadeIn: 0,            // mechanism cross-fade when switching algorithms
+      dash: 0,              // marching-dash offset for the flow line
+      vis: Math.floor(a),   // token bucket: tokens currently shown solid
+      inflight: 0,          // token bucket: drops currently falling into slots
+      floats: [],           // floating "+1 / -1 / retry" texts
+      retryUntil: 0, retryTotal: 0, // countdown ring at the gate after a denial
     };
     packetsRef.current = [];
     pulsesRef.current = [];
+    shardsRef.current = [];
   }
 
   // ---- sync params/algo to the backend + reset the visual ----
@@ -217,13 +229,15 @@ export default function Simulator() {
     clearTimeout(cfgTimerRef.current);
     cfgTimerRef.current = setTimeout(() => {
       fetch(`/api/config?algo=${algoId}&p1=${Number(p1)}&p2=${Number(p2)}`)
-        .then(() => setConn("ok"))
+        .then((r) => setConn(r.ok ? "ok" : "bad"))
         .catch(() => setConn("bad"));
     }, 120);
+    return () => clearTimeout(cfgTimerRef.current);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [algoId, p1, p2]);
 
   function switchAlgo(id) {
+    if (id === algoId) { resetMech(); return; } // re-click on the active tab: just reset the visual
     const a = ALGOS.find((x) => x.id === id);
     clearPreset();
     setAlgoId(id);
@@ -248,16 +262,37 @@ export default function Simulator() {
     packetsRef.current.push(p);
 
     const key = encodeURIComponent(c.key || "anon");
+    const sentCost = costRef.current;
     const t0 = performance.now();
-    fetch(`/api/check?algo=${c.algoId}&key=${key}&cost=${costRef.current}`)
-      .then((r) => r.json())
+    fetch(`/api/check?algo=${c.algoId}&key=${key}&cost=${sentCost}`)
+      .then((r) => {
+        // 429 = a real "Too Many Requests" denial, still carries the decision JSON
+        if (!r.ok && r.status !== 429) throw new Error(`HTTP ${r.status}`);
+        return r.json();
+      })
       .then((d) => {
         setLatency(Math.round((performance.now() - t0) * 10) / 10);
         p.dec = d;
-        applySnap(c.algoId, d);
+        applySnap(c.algoId, d, sentCost);
         if (d.allowed) { setAllowed((x) => x + 1); secRef.current.a++; }
-        else { setDenied((x) => x + 1); secRef.current.d++; }
+        else {
+          setDenied((x) => x + 1); secRef.current.d++;
+          if (d.retry_after > 0.05) {
+            const { w: sw, h: sh } = sizeRef.current;
+            mFloat(sw * 0.46 - 70, sh * 0.52 - 34, `retry in ${d.retry_after.toFixed(1)}s`, C.bad);
+            const m = mechRef.current;
+            if (m) { // countdown ring at the gate until the next slot frees up
+              m.retryUntil = performance.now() / 1000 + d.retry_after;
+              m.retryTotal = d.retry_after;
+            }
+          }
+        }
         setFeed((f) => [{ id: p.id, ok: d.allowed }, ...f].slice(0, 10));
+        setLog((l) => [{
+          t: Date.now(), algo: c.algoId, key: c.key || "anon", cost: sentCost,
+          allowed: d.allowed, remaining: Math.max(0, Math.floor(d.remaining)),
+          retry: d.allowed ? 0 : +(+d.retry_after).toFixed(2),
+        }, ...l].slice(0, 100));
         setConn("ok");
       })
       .catch(() => {
@@ -266,8 +301,34 @@ export default function Simulator() {
       });
   }
 
+  // token-bucket slot geometry, shared by draw / spawn / consume logic so a
+  // falling drop lands exactly on the slot it will light up
+  function tokenGrid(a, cx, cy) {
+    const bw = 150, bh = 150, bx = cx - bw / 2, by = cy - bh / 2 + 10;
+    const cols = Math.ceil(Math.sqrt(a));
+    const rows = Math.ceil(a / cols);
+    const pad = 16, gap = 6;
+    const cellW = (bw - pad * 2) / cols, cellH = (bh - pad * 2) / rows;
+    const rad = Math.max(4, Math.min(cellW, cellH) / 2 - gap);
+    return {
+      bw, bh, bx, by, cols, rows, rad,
+      pos(i) {
+        const col = i % cols, row = Math.floor(i / cols);
+        const vrow = rows - 1 - row; // fill bottom-up
+        return { x: bx + pad + cellW * col + cellW / 2, y: by + pad + cellH * vrow + cellH / 2 };
+      },
+    };
+  }
+
+  // floating feedback text ("+1", "-1", "retry in 2.3s", ...)
+  function mFloat(x, y, txt, color) {
+    const m = mechRef.current;
+    if (!m) return;
+    m.floats.push({ x, y, txt, color, life: 0.9 });
+  }
+
   // snap the visual mechanism to the backend's authoritative numbers
-  function applySnap(id, d) {
+  function applySnap(id, d, cost = 1) {
     const m = mechRef.current;
     if (!m) return;
     const { w, h } = sizeRef.current;
@@ -275,9 +336,18 @@ export default function Simulator() {
     if (id === "token_bucket") {
       m.tokens = d.remaining;
       if (d.allowed) {
-        // a token leaves the bucket and flies to the gate to be "spent"
-        m.parts.push({ type: "consume", x: cx, y: cy - 30, tx: limiterX, ty: cy,
-          r: 7, life: 5, color: C.ok });
+        // the spent tokens fly out of their actual slots to the gate
+        const a = Math.max(1, Number(cfgRef.current.p1));
+        const g = tokenGrid(a, cx, cy);
+        const n = Math.min(cost, 4);
+        for (let i = 0; i < n; i++) {
+          const slot = Math.max(0, Math.min(a - 1, Math.floor(d.remaining) + i));
+          const p0 = g.pos(slot);
+          m.parts.push({ type: "consume", x: p0.x, y: p0.y, tx: limiterX, ty: cy,
+            r: 7, life: 5, color: C.ok });
+        }
+        const top = g.pos(Math.max(0, Math.min(a - 1, Math.floor(d.remaining))));
+        mFloat(top.x, top.y - 14, cost > 1 ? `-${cost}` : "-1", C.warn);
       }
     } else if (id === "leaking_bucket") {
       m.level = d.used;
@@ -286,29 +356,40 @@ export default function Simulator() {
         const lby = cy - 74;
         m.parts.push({ type: "inflow", x: cx + (Math.random() * 10 - 5), y: lby - 30,
           vx: 0, vy: 80, g: 300, r: 4.5, life: 4, landY: lby + 12, color: C.water });
+        mFloat(cx + 26, lby - 26, cost > 1 ? `+${cost}` : "+1", C.water);
       }
     } else if (id === "fixed_window") {
       m.count = d.used;
-      if (d.allowed)
+      // a denied response reports exactly how long until the window resets —
+      // use it to keep the client dial in phase with the backend's window grid
+      if (!d.allowed && d.retry_after > 0) m.winTimer = d.retry_after;
+      if (d.allowed) {
         m.parts.push({ type: "refill", x: cx - 30, y: cy - 120, vx: 0, vy: 90, g: 320,
           r: 5, life: 4, landY: cy - 92, color: C.ok });
+        mFloat(cx - 30, cy - 128, cost > 1 ? `+${cost}` : "+1", C.ok);
+      }
     } else if (id === "sliding_window_counter") {
       m.used = d.used;
+      if (!d.allowed && d.retry_after > 0)
+        m.winTimer = Math.min(m.winTimer, d.retry_after);
       if (d.allowed) {
-        m.cur += 1;
+        m.cur += cost; // mirror the backend, which consumed `cost` units
         const bw = 70, gap = 40, baseX = cx - bw - gap / 2 - 10;
         const curX = baseX + bw + gap + bw / 2;
         m.parts.push({ type: "refill", x: curX, y: cy - 110, vx: 0, vy: 90, g: 320,
           r: 5, life: 4, landY: cy - 70, color: C.ok });
+        mFloat(curX, cy - 118, cost > 1 ? `+${cost}` : "+1", C.ok);
       }
     } else if (id === "sliding_window_log") {
       m.used = d.used;
       if (d.allowed) {
-        m.ticks.push(performance.now() / 1000);
+        const tnow = performance.now() / 1000;
+        for (let i = 0; i < cost; i++) m.ticks.push(tnow); // one tick per consumed unit
         const trackW = Math.min(360, w * 0.5);
         const nowX = cx + trackW / 2 + 30;
         m.parts.push({ type: "refill", x: nowX, y: cy - 60, vx: 0, vy: 90, g: 320,
           r: 5, life: 4, landY: cy - 30, color: C.ok });
+        mFloat(nowX, cy - 68, cost > 1 ? `+${cost}` : "+1", C.ok);
       }
     }
   }
@@ -322,6 +403,20 @@ export default function Simulator() {
     return () => clearInterval(autoTimerRef.current);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [auto, autoRate]);
+
+  // ---- keyboard: Space fires a request (unless typing in an input) ----
+  useEffect(() => {
+    const onKey = (e) => {
+      if (e.code !== "Space") return;
+      const t = e.target;
+      if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return;
+      e.preventDefault();
+      send();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // ---- traffic presets ----
   function clearPresetTimers() {
@@ -354,8 +449,22 @@ export default function Simulator() {
     fetch("/api/reset").then(() => setConn("ok")).catch(() => setConn("bad"));
     clearPreset();
     resetMech();
-    setAllowed(0); setDenied(0); setFeed([]); setLatency(null);
+    setAllowed(0); setDenied(0); setFeed([]); setLatency(null); setLog([]);
     historyRef.current = []; secRef.current = { a: 0, d: 0 };
+  }
+
+  // download the decision log as CSV
+  function exportCsv() {
+    const head = "time,algorithm,key,cost,result,remaining,retry_after_s";
+    const rows = log.map((r) =>
+      [new Date(r.t).toISOString(), r.algo, r.key, r.cost,
+        r.allowed ? "allowed" : "denied", r.remaining, r.retry].join(","));
+    const blob = new Blob([[head, ...rows].join("\n")], { type: "text/csv" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = "rate-limiter-decisions.csv";
+    a.click();
+    URL.revokeObjectURL(a.href);
   }
 
   // roll the per-second throughput buckets once a second
@@ -419,9 +528,21 @@ export default function Simulator() {
     }
     resize();
     window.addEventListener("resize", resize);
+    const onMove = (e) => {
+      const r = cv.getBoundingClientRect();
+      chartMouseRef.current = { x: e.clientX - r.left, y: e.clientY - r.top };
+    };
+    const onLeave = () => { chartMouseRef.current = null; };
+    cv.addEventListener("mousemove", onMove);
+    cv.addEventListener("mouseleave", onLeave);
     function frame() { drawChart(ctx); raf = requestAnimationFrame(frame); }
     raf = requestAnimationFrame(frame);
-    return () => { cancelAnimationFrame(raf); window.removeEventListener("resize", resize); };
+    return () => {
+      cancelAnimationFrame(raf);
+      window.removeEventListener("resize", resize);
+      cv.removeEventListener("mousemove", onMove);
+      cv.removeEventListener("mouseleave", onLeave);
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -451,21 +572,66 @@ export default function Simulator() {
       ctx.fillText(String(Math.round(v)), padL - 6, y);
     }
 
-    function series(key, color, fill) {
+    // smooth curve through the points (quadratic midpoint smoothing)
+    function tracePath(key) {
       ctx.beginPath();
-      pts.forEach((p, i) => { const x = xAt(i), y = yAt(p[key]); i ? ctx.lineTo(x, y) : ctx.moveTo(x, y); });
+      for (let i = 0; i < pts.length; i++) {
+        const x = xAt(i), y = yAt(pts[i][key]);
+        if (i === 0) { ctx.moveTo(x, y); continue; }
+        const xp = xAt(i - 1), yp = yAt(pts[i - 1][key]);
+        ctx.quadraticCurveTo(xp, yp, (xp + x) / 2, (yp + y) / 2);
+      }
+      ctx.lineTo(xAt(pts.length - 1), yAt(pts[pts.length - 1][key]));
+    }
+
+    function series(key, color, fill, glow) {
       if (fill) {
+        tracePath(key);
         ctx.lineTo(xAt(N - 1), yAt(0)); ctx.lineTo(xAt(0), yAt(0)); ctx.closePath();
         const grad = ctx.createLinearGradient(0, padT, 0, padT + ch);
         grad.addColorStop(0, fill); grad.addColorStop(1, "rgba(0,0,0,0)");
         ctx.fillStyle = grad; ctx.fill();
-        ctx.beginPath();
-        pts.forEach((p, i) => { const x = xAt(i), y = yAt(p[key]); i ? ctx.lineTo(x, y) : ctx.moveTo(x, y); });
       }
-      ctx.strokeStyle = color; ctx.lineWidth = 2; ctx.lineJoin = "round"; ctx.stroke();
+      tracePath(key);
+      ctx.strokeStyle = color; ctx.lineWidth = 2; ctx.lineJoin = "round";
+      if (glow) { ctx.shadowColor = color; ctx.shadowBlur = 8; }
+      ctx.stroke();
+      ctx.shadowBlur = 0;
+      // live endpoint dot
+      const lx = xAt(pts.length - 1), ly = yAt(pts[pts.length - 1][key]);
+      ctx.beginPath(); ctx.arc(lx, ly, 3, 0, Math.PI * 2);
+      ctx.fillStyle = color; ctx.fill();
     }
-    series("a", C.ok, "rgba(63,185,80,0.22)");
-    series("d", C.bad, null);
+    series("a", C.ok, "rgba(63,185,80,0.20)", true);
+    series("d", C.bad, null, false);
+
+    // hover tooltip: crosshair + values at the nearest second
+    const mp = chartMouseRef.current;
+    if (mp && mp.x >= padL && mp.x <= w - padR) {
+      const idx = Math.max(0, Math.min(N - 1, Math.round(((mp.x - padL) / cw) * (N - 1))));
+      const x = xAt(idx);
+      const pt = pts[idx];
+      ctx.setLineDash([4, 4]);
+      ctx.strokeStyle = "rgba(255,255,255,0.28)"; ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(x, padT); ctx.lineTo(x, padT + ch); ctx.stroke();
+      ctx.setLineDash([]);
+      for (const [k, col] of [["a", C.ok], ["d", C.bad]]) {
+        ctx.beginPath(); ctx.arc(x, yAt(pt[k]), 4, 0, Math.PI * 2);
+        ctx.fillStyle = col; ctx.fill();
+        ctx.strokeStyle = "#0a0a0b"; ctx.lineWidth = 1.5; ctx.stroke();
+      }
+      const ago = N - 1 - idx;
+      const txt = `${ago === 0 ? "now" : `-${ago}s`}   ✓ ${pt.a}   ✗ ${pt.d}`;
+      ctx.font = "600 11px ui-sans-serif, system-ui, sans-serif";
+      const tw = ctx.measureText(txt).width + 18;
+      let bx = x + 10;
+      if (bx + tw > w - 6) bx = x - tw - 10;
+      roundRect(ctx, bx, padT - 4, tw, 22, 6);
+      ctx.fillStyle = "rgba(10,10,11,0.92)"; ctx.fill();
+      ctx.strokeStyle = "rgba(255,255,255,0.18)"; ctx.lineWidth = 1; ctx.stroke();
+      ctx.fillStyle = "#e3e7ec"; ctx.textAlign = "left"; ctx.textBaseline = "middle";
+      ctx.fillText(txt, bx + 9, padT + 7);
+    }
   }
 
   // ---- per-frame state update ----
@@ -483,16 +649,20 @@ export default function Simulator() {
     // mechanism continuous motion
     if (c.algoId === "token_bucket") {
       m.tokens = Math.min(a, m.tokens + b * dt);
-      // steady stream of token drops falling from the refill pipe into the bucket
-      const by = cy - 65;
-      if (m.tokens < a - 0.001) {
-        m.refillAcc += b * dt;
-        while (m.refillAcc >= 1) {
-          m.refillAcc -= 1;
-          m.parts.push({ type: "refill", x: cx + (Math.random() * 10 - 5), y: by - 40,
-            vx: 0, vy: 70, g: 280, r: 4.5, life: 5, landY: by + 24, color: C.ok });
-        }
-      } else m.refillAcc = 0;
+      const target = Math.floor(m.tokens + 1e-6);
+      // tokens were spent: solid ones disappear instantly (they flew to the gate)
+      if (m.vis > target) m.vis = target;
+      // huge jump (reset / param change): snap most of it, animate the last few
+      if (target - (m.vis + m.inflight) > 5) m.vis = target - 3;
+      // each newly-earned token falls from the pipe into its exact slot
+      const g = tokenGrid(a, cx, cy);
+      while (m.vis + m.inflight < target && m.inflight < 4) {
+        const slot = Math.min(a - 1, m.vis + m.inflight);
+        const p0 = g.pos(slot);
+        m.parts.push({ type: "tok", sx: cx, sy: g.by - 46, tx: p0.x, ty: p0.y,
+          x: cx, y: g.by - 46, t: 0, r: Math.min(8, g.rad), color: C.ok });
+        m.inflight++;
+      }
     } else if (c.algoId === "leaking_bucket") {
       m.level = Math.max(0, m.level - b * dt);
       // steady stream of drops leaking out of the hole at the bottom
@@ -516,6 +686,8 @@ export default function Simulator() {
       m.ticks = m.ticks.filter((t) => tnow - t <= b);
     }
     if (m.flash > 0) m.flash = Math.max(0, m.flash - dt * 2);
+    m.fadeIn = Math.min(1, m.fadeIn + dt * 2.6); // mechanism cross-fade
+    m.dash += dt * 26;                            // flow-line marching dashes
 
     // ease the displayed bar values toward their targets for smooth motion
     const ease = Math.min(1, dt * 10);
@@ -530,6 +702,22 @@ export default function Simulator() {
         const s = 460 * dt;
         if (d <= s) pt.dead = true;
         else { pt.x += (dx / d) * s; pt.y += (dy / d) * s; }
+      } else if (pt.type === "tok") {
+        // arc from the pipe mouth into the target slot (quadratic bezier)
+        pt.t += dt / 0.38;
+        if (pt.t >= 1) {
+          pt.dead = true;
+          m.inflight = Math.max(0, m.inflight - 1);
+          m.vis = Math.min(Math.floor(m.tokens + 1e-6), m.vis + 1);
+          pulsesRef.current.push({ x: pt.tx, y: pt.ty, r: 3, alpha: 0.6, ok: true });
+          mFloat(pt.tx, pt.ty - 14, "+1", C.ok);
+        } else {
+          const t = pt.t, u = 1 - t;
+          const mx = (pt.sx + pt.tx) / 2;
+          const my = Math.min(pt.sy, pt.ty) - 16; // control point above → gentle arc
+          pt.x = u * u * pt.sx + 2 * u * t * mx + t * t * pt.tx;
+          pt.y = u * u * pt.sy + 2 * u * t * my + t * t * pt.ty;
+        }
       } else {
         pt.vy += pt.g * dt;
         pt.x += pt.vx * dt;
@@ -544,9 +732,17 @@ export default function Simulator() {
     }
     m.parts = m.parts.filter((p) => !p.dead);
 
+    // floating feedback texts drift up and fade
+    for (const f of m.floats) { f.y -= 26 * dt; f.life -= dt; }
+    m.floats = m.floats.filter((f) => f.life > 0);
+
     // packets
     const speed = 320;
     for (const p of packetsRef.current) {
+      // comet trail: remember the last few positions
+      (p.trail ||= []).push({ x: p.x, y: p.y });
+      if (p.trail.length > 7) p.trail.shift();
+
       let tx, ty;
       if (p.phase === "in") { tx = limiterX; ty = cy; }
       else if (p.phase === "out") { tx = serverX - 26; ty = cy; }
@@ -559,6 +755,7 @@ export default function Simulator() {
           if (p.dec) {
             p.phase = p.dec.allowed ? "out" : "rej";
             pulsesRef.current.push({ x: limiterX, y: cy, r: 6, alpha: 0.9, ok: p.dec.allowed });
+            spawnShards(limiterX, cy, p.dec.allowed);
           }
           // else: wait at the gate until the decision arrives
         } else {
@@ -575,6 +772,27 @@ export default function Simulator() {
     // pulses
     for (const pu of pulsesRef.current) { pu.r += dt * 90; pu.alpha -= dt * 1.6; }
     pulsesRef.current = pulsesRef.current.filter((pu) => pu.alpha > 0);
+
+    // decision debris
+    for (const s of shardsRef.current) {
+      s.x += s.vx * dt; s.y += s.vy * dt;
+      s.vx *= 1 - dt * 2.2; s.vy *= 1 - dt * 2.2;
+      s.life -= dt;
+    }
+    shardsRef.current = shardsRef.current.filter((s) => s.life > 0);
+  }
+
+  // small burst of debris at the gate when a decision lands
+  function spawnShards(x, y, ok) {
+    const n = ok ? 5 : 9;
+    for (let i = 0; i < n; i++) {
+      const ang = Math.random() * Math.PI * 2;
+      const sp = 60 + Math.random() * 170;
+      shardsRef.current.push({
+        x, y, vx: Math.cos(ang) * sp, vy: Math.sin(ang) * sp,
+        life: 0.45 + Math.random() * 0.2, ok,
+      });
+    }
   }
 
   // ---- render everything ----
@@ -595,10 +813,42 @@ export default function Simulator() {
     for (let x = 0; x < w; x += 28) { ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, h); ctx.stroke(); }
     for (let y = 0; y < h; y += 28) { ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(w, y); ctx.stroke(); }
 
-    // flow line client -> gate -> server
-    ctx.strokeStyle = "rgba(255,255,255,0.18)";
+    // flow line client -> gate -> server, with marching dashes showing direction
+    ctx.strokeStyle = "rgba(255,255,255,0.22)";
     ctx.lineWidth = 2;
+    ctx.setLineDash([3, 11]);
+    ctx.lineDashOffset = -m.dash;
     ctx.beginPath(); ctx.moveTo(64, cy); ctx.lineTo(serverX - 26, cy); ctx.stroke();
+    ctx.setLineDash([]);
+
+    // the gate: two glowing posts with a gap the packets pass through
+    const gh = 118, gapR = 15;
+    const gatePulse = 0.55 + 0.45 * Math.sin(performance.now() / 480);
+    ctx.save();
+    ctx.shadowColor = "rgba(255,255,255,0.5)";
+    ctx.shadowBlur = 10 * gatePulse;
+    ctx.fillStyle = "rgba(255,255,255,0.22)";
+    roundRect(ctx, limiterX - 4, cy - gh / 2, 8, gh / 2 - gapR, 4); ctx.fill();
+    roundRect(ctx, limiterX - 4, cy + gapR, 8, gh / 2 - gapR, 4); ctx.fill();
+    ctx.restore();
+    ctx.strokeStyle = "rgba(255,255,255,0.28)"; ctx.lineWidth = 1;
+    roundRect(ctx, limiterX - 4, cy - gh / 2, 8, gh / 2 - gapR, 4); ctx.stroke();
+    roundRect(ctx, limiterX - 4, cy + gapR, 8, gh / 2 - gapR, 4); ctx.stroke();
+    label(ctx, "GATE", limiterX, cy + gh / 2 + 14, C.muted, 9.5);
+
+    // retry countdown ring: after a denial, shows how long until a slot frees
+    const nowS = performance.now() / 1000;
+    if (m.retryUntil > nowS && m.retryTotal > 0.05) {
+      const remain = m.retryUntil - nowS;
+      const frac = Math.max(0, Math.min(1, remain / m.retryTotal));
+      const ry = cy - gh / 2 - 26;
+      ctx.beginPath(); ctx.arc(limiterX, ry, 13, 0, Math.PI * 2);
+      ctx.strokeStyle = "rgba(248,81,73,0.2)"; ctx.lineWidth = 3; ctx.stroke();
+      ctx.beginPath();
+      ctx.arc(limiterX, ry, 13, -Math.PI / 2, -Math.PI / 2 + frac * Math.PI * 2);
+      ctx.strokeStyle = C.bad; ctx.lineWidth = 3; ctx.stroke();
+      label(ctx, remain.toFixed(1), limiterX, ry, C.bad, 9, "center", "700");
+    }
 
     // client box
     drawEndpoint(ctx, 30, cy - 26, 64, 52, "Client", C.accent);
@@ -607,13 +857,16 @@ export default function Simulator() {
     // reject bin
     drawEndpoint(ctx, serverX - 24, h - 70, 64, 46, "Rejected", C.bad);
 
-    // algorithm mechanism
+    // algorithm mechanism (cross-fades in when switching algorithms)
     const cx = w * 0.46;
+    ctx.save();
+    ctx.globalAlpha = m.fadeIn;
     if (c.algoId === "token_bucket") drawTokenBucket(ctx, m, c, cx, cy);
     else if (c.algoId === "leaking_bucket") drawLeakingBucket(ctx, m, c, cx, cy);
     else if (c.algoId === "fixed_window") drawFixedWindow(ctx, m, c, cx, cy, w, h);
     else if (c.algoId === "sliding_window_log") drawSlidingLog(ctx, m, c, cx, cy, w, h);
     else if (c.algoId === "sliding_window_counter") drawSlidingCounter(ctx, m, c, cx, cy, w, h);
+    ctx.restore();
 
     // particles (refill / leak / inflow / consumed-token)
     for (const pt of m.parts) {
@@ -631,15 +884,40 @@ export default function Simulator() {
       ctx.stroke();
     }
 
-    // packets
+    // decision debris at the gate
+    for (const s of shardsRef.current) {
+      ctx.globalAlpha = Math.max(0, s.life / 0.55);
+      ctx.fillStyle = s.ok ? C.ok : C.bad;
+      ctx.fillRect(s.x - 2, s.y - 2, 4, 4);
+    }
+    ctx.globalAlpha = 1;
+
+    // floating feedback texts ("+1", "-1", "retry in …")
+    for (const f of m.floats) {
+      ctx.globalAlpha = Math.max(0, f.life / 0.9);
+      label(ctx, f.txt, f.x, f.y, f.color, 12.5, "center", "800");
+    }
+    ctx.globalAlpha = 1;
+
+    // packets, each with a comet trail
     for (const p of packetsRef.current) {
       const color = p.phase === "out" ? C.ok : p.phase === "rej" ? C.bad : C.accent;
+      if (p.trail && p.trail.length > 1) {
+        ctx.lineCap = "round";
+        for (let i = 1; i < p.trail.length; i++) {
+          const t0 = p.trail[i - 1], t1 = p.trail[i];
+          ctx.globalAlpha = (i / p.trail.length) * 0.32 * Math.max(0, p.alpha);
+          ctx.lineWidth = 1.5 + i * 0.7;
+          ctx.strokeStyle = color;
+          ctx.beginPath(); ctx.moveTo(t0.x, t0.y); ctx.lineTo(t1.x, t1.y); ctx.stroke();
+        }
+      }
       ctx.globalAlpha = Math.max(0, p.alpha);
       ctx.beginPath();
       ctx.arc(p.x, p.y, 8, 0, Math.PI * 2);
       ctx.fillStyle = color;
       ctx.shadowColor = color;
-      ctx.shadowBlur = 12;
+      ctx.shadowBlur = 14;
       ctx.fill();
       ctx.shadowBlur = 0;
       ctx.globalAlpha = 1;
@@ -674,27 +952,27 @@ export default function Simulator() {
     ctx.fill();
     ctx.strokeStyle = C.border; ctx.lineWidth = 2; ctx.stroke();
 
-    // token dots in a grid
-    const full = Math.floor(m.tokens + 1e-6);
-    const frac = m.tokens - full;
-    const cols = Math.ceil(Math.sqrt(a));
-    const rows = Math.ceil(a / cols);
-    const pad = 16, gap = 6;
-    const cellW = (bw - pad * 2) / cols, cellH = (bh - pad * 2) / rows;
-    const rad = Math.max(4, Math.min(cellW, cellH) / 2 - gap);
+    // token slots: solid tokens are ones that have visibly landed (m.vis);
+    // the fractional/incoming ones are the drops arcing in from the pipe
+    const g = tokenGrid(a, cx, cy);
     for (let i = 0; i < a; i++) {
-      const col = i % cols, row = Math.floor(i / cols);
-      // fill from the bottom up
-      const visualRow = rows - 1 - row;
-      const tx = bx + pad + cellW * col + cellW / 2;
-      const ty = by + pad + cellH * visualRow + cellH / 2;
-      let alpha = 0;
-      if (i < full) alpha = 1;
-      else if (i === full) alpha = frac;
-      ctx.beginPath(); ctx.arc(tx, ty, rad, 0, Math.PI * 2);
-      ctx.fillStyle = `rgba(63,185,80,${0.18 + 0.82 * alpha})`;
-      ctx.fill();
-      ctx.strokeStyle = "rgba(63,185,80,0.35)"; ctx.lineWidth = 1; ctx.stroke();
+      const p0 = g.pos(i);
+      const filled = i < m.vis;
+      ctx.beginPath(); ctx.arc(p0.x, p0.y, g.rad, 0, Math.PI * 2);
+      if (filled) {
+        ctx.fillStyle = "rgba(63,185,80,0.95)";
+        ctx.shadowColor = C.ok; ctx.shadowBlur = 7;
+        ctx.fill();
+        ctx.shadowBlur = 0;
+        ctx.strokeStyle = "rgba(63,185,80,0.5)"; ctx.lineWidth = 1; ctx.stroke();
+      } else {
+        // empty slot: faint ghost ring waiting for its token
+        ctx.fillStyle = "rgba(63,185,80,0.07)";
+        ctx.fill();
+        ctx.setLineDash([3, 3]);
+        ctx.strokeStyle = "rgba(255,255,255,0.16)"; ctx.lineWidth = 1; ctx.stroke();
+        ctx.setLineDash([]);
+      }
     }
     label(ctx, `${m.tokens.toFixed(1)} / ${a} tokens`, cx, by + bh + 18, C.text, 13);
     label(ctx, `refills ${c.p2}/s`, cx, by + bh + 36, C.muted, 11);
@@ -726,7 +1004,7 @@ export default function Simulator() {
       ctx.lineTo(bx + 3 + x, wy + Math.sin(x / 14 + t) * 3);
     }
     ctx.lineTo(bx + bw - 3, by + bh); ctx.lineTo(bx + 3, by + bh); ctx.closePath();
-    ctx.fillStyle = "rgba(255,255,255,0.85)"; ctx.fill();
+    ctx.fillStyle = "rgba(47,129,247,0.85)"; ctx.fill();
     ctx.restore();
     // leak spout at the bottom (the falling drops are particles drawn separately)
     ctx.fillStyle = C.panel2;
@@ -849,7 +1127,7 @@ export default function Simulator() {
   return (
     <div className="sim">
       {/* algorithm tabs */}
-      <div className="seg">
+      <div className="seg rise" style={{ "--d": "0ms" }}>
         {ALGOS.map((a) => (
           <button
             key={a.id}
@@ -861,16 +1139,20 @@ export default function Simulator() {
         ))}
       </div>
 
-      <p className="blurb">{algo.blurb}</p>
+      <p className="blurb fadein" key={`blurb-${algoId}`}>{algo.blurb}</p>
 
       <div className="sim-grid">
         {/* stage */}
-        <div className="stage">
+        <div className="stage rise" style={{ "--d": "120ms" }}>
           <canvas ref={canvasRef} className="canvas" />
+          <div className="stage-hud">
+            <span className="hud-chip">{algo.title}</span>
+            <span className="hud-chip dim">key · {keyName || "anon"}</span>
+          </div>
         </div>
 
         {/* side panel */}
-        <aside className="panel">
+        <aside className="panel rise" style={{ "--d": "200ms" }}>
           <div className="row">
             <span className="muted">Status</span>
             <span className={connPill[0]}>{connPill[1]}</span>
@@ -900,8 +1182,8 @@ export default function Simulator() {
           </label>
 
           <div className="stats2">
-            <div className="stat ok"><span>Allowed</span><b>{allowed}</b></div>
-            <div className="stat bad"><span>Denied</span><b>{denied}</b></div>
+            <div className="stat ok"><span>Allowed</span><b key={`a${allowed}`}>{allowed}</b></div>
+            <div className="stat bad"><span>Denied</span><b key={`d${denied}`}>{denied}</b></div>
           </div>
 
           <div className="badge" title="Round-trip time of the last request to the C++ backend">
@@ -922,6 +1204,7 @@ export default function Simulator() {
             <button className="btn btn-primary big" onClick={send}>Send request ▶</button>
             <button className="btn" onClick={() => { for (let i = 0; i < 10; i++) send(); }}>Burst 10</button>
           </div>
+          <span className="muted small kbd-hint">tip: press <kbd>Space</kbd> to fire a request</span>
 
           <label className="ctl auto">
             <span>
@@ -951,7 +1234,7 @@ export default function Simulator() {
       </div>
 
       {/* ---- live throughput chart ---- */}
-      <section className="metrics">
+      <section className="metrics rise" style={{ "--d": "280ms" }}>
         <div className="metrics-head">
           <h3>Live throughput</h3>
           <div className="legend">
@@ -963,8 +1246,48 @@ export default function Simulator() {
         <canvas ref={chartRef} className="chart" />
       </section>
 
-      {/* ---- premium per-algorithm explainer ---- */}
-      <Explainer algoId={algoId} title={algo.title}
+      {/* ---- benchmark: hard numbers across all five algorithms ---- */}
+      <Benchmark />
+
+      {/* ---- decision log ---- */}
+      <section className="dlog">
+        <div className="bench-head">
+          <div>
+            <h3>Decision log</h3>
+            <p className="muted">Every request this session — result, remaining budget and retry hints.</p>
+          </div>
+          <div className="dlog-actions">
+            <span className="muted small">{log.length} {log.length === 1 ? "entry" : "entries"}</span>
+            <button className="btn" onClick={exportCsv} disabled={!log.length}>⬇ Export CSV</button>
+            <button className="btn btn-ghost" onClick={() => setLog([])} disabled={!log.length}>Clear</button>
+          </div>
+        </div>
+        {log.length > 0 && (
+          <div className="dlog-table-wrap">
+            <table className="bench-table">
+              <thead>
+                <tr><th>Time</th><th>Algorithm</th><th>Key</th><th>Cost</th><th>Result</th><th>Remaining</th><th>Retry after</th></tr>
+              </thead>
+              <tbody>
+                {log.slice(0, 50).map((r, i) => (
+                  <tr key={`${r.t}-${i}`}>
+                    <td className="muted">{new Date(r.t).toLocaleTimeString([], { hour12: false })}</td>
+                    <td className="bt-name">{r.algo}</td>
+                    <td>{r.key}</td>
+                    <td>{r.cost}</td>
+                    <td className={r.allowed ? "ok-txt" : "bad-txt"}>{r.allowed ? "✓ allowed" : "✗ denied"}</td>
+                    <td>{r.remaining}</td>
+                    <td>{r.retry ? `${r.retry}s` : "—"}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </section>
+
+      {/* ---- premium per-algorithm explainer (remounts to replay its entrance) ---- */}
+      <Explainer key={algoId} algoId={algoId} title={algo.title}
         index={ALGOS.findIndex((a) => a.id === algoId) + 1} />
     </div>
   );
@@ -1018,6 +1341,9 @@ function Explainer({ algoId, title, index }) {
           </div>
         </div>
       </div>
+
+      {/* the real C++ implementation, straight from the engine */}
+      <CppSource algoId={algoId} />
     </section>
   );
 }
