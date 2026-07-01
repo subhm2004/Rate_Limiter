@@ -94,7 +94,22 @@ code {
   color: #0a0a0b; background: #fff; font-weight: 600; margin-left: 6px;
 }
 .vnav-mid a.vnav-cta:hover { background: #e6e6ea; }
-@media (max-width: 560px) { .vnav-mid a:not(.vnav-cta) { display: none; } }
+
+/* circular GitHub button */
+.vnav-mid a.gh-btn {
+  width: 37px; height: 37px; padding: 0; margin-left: 4px;
+  display: inline-flex; align-items: center; justify-content: center;
+  border-radius: 50%; color: #e6e6e8;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid var(--border-strong);
+  transition: all 0.18s ease;
+}
+.vnav-mid a.gh-btn:hover {
+  color: #0a0a0b; background: #fff; border-color: #fff;
+  transform: scale(1.08);
+}
+
+@media (max-width: 560px) { .vnav-mid a:not(.vnav-cta):not(.gh-btn) { display: none; } }
 
 /* ============ motion ============ */
 .rise {
@@ -315,18 +330,20 @@ code {
 .sim-heading h1 { margin: 0; font-size: 27px; font-weight: 800; letter-spacing: -0.03em; }
 .sim-heading p { margin: 0; color: var(--muted); font-size: 13.5px; }
 
-/* algorithm tabs */
+/* algorithm tabs: a full-width segmented control, tabs share the row evenly */
 .seg {
   display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 16px;
   padding: 6px; border-radius: 14px;
   background: rgba(255, 255, 255, 0.03);
   border: 1px solid var(--border);
-  width: fit-content;
+  width: 100%;
 }
 .seg-btn {
+  flex: 1 1 auto; text-align: center; min-width: 150px;
   border: 1px solid transparent; background: transparent; color: var(--muted);
-  border-radius: 9px; padding: 9px 15px; font-size: 13px; font-weight: 600;
+  border-radius: 9px; padding: 10px 15px; font-size: 13px; font-weight: 600;
   font-family: inherit; cursor: pointer; transition: all 0.16s ease;
+  white-space: nowrap;
 }
 .seg-btn:hover { color: var(--text); background: rgba(255, 255, 255, 0.05); }
 .seg-btn.active {
