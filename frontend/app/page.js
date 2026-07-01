@@ -46,6 +46,11 @@ export default function Landing() {
         <div className="techrow rise" style={{ "--d": "560ms" }}>
           {TECH.map((t) => <span className="tech" key={t}>{t}</span>)}
         </div>
+        <a href="#demo" className="scroll-hint" aria-label="Scroll to the live demo">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M6 9l6 6 6-6" />
+          </svg>
+        </a>
       </header>
 
       {/* ---- stats band ---- */}
@@ -106,13 +111,36 @@ export default function Landing() {
       <section className="cta-band" data-reveal>
         <h2>Go break some limits</h2>
         <p>Fire a DDoS spike, drag the sliders, and watch each algorithm fight back.</p>
-        <Link href="/simulator" className="btn btn-white big">▶ Launch the simulator</Link>
-        <p className="cta-local">or run it locally — <code>npm run dev</code></p>
+        <div className="vbtns">
+          <Link href="/simulator" className="btn btn-white big">▶ Launch the simulator</Link>
+          <a href="https://github.com/subhm2004/Rate_Limiter" target="_blank" rel="noopener noreferrer"
+            className="btn btn-line big">View on GitHub</a>
+        </div>
       </section>
 
-      <footer className="lfooter">
-        <span>⏱️ Rate Limiter</span>
-        <span>Built to <em>see</em> how rate limiting actually works · C++ · Node · Next.js</span>
+      <footer className="lfooter2">
+        <div className="lf-grid">
+          <div className="lf-brand">
+            <div className="lf-logo"><span className="vlogo">R</span><b>RateLimiter</b></div>
+            <p>Rate limiting, visualized. Real decisions from a thread-safe C++ engine, animated in your browser.</p>
+          </div>
+          <div className="lf-col">
+            <h5>Explore</h5>
+            <Link href="/simulator">Simulator</Link>
+            <Link href="/compare">Compare</Link>
+            <a href="https://github.com/subhm2004/Rate_Limiter" target="_blank" rel="noopener noreferrer">GitHub ↗</a>
+          </div>
+          <div className="lf-col">
+            <h5>Stack</h5>
+            <span>C++17 engine · N-API</span>
+            <span>Node.js · Express</span>
+            <span>Next.js · React</span>
+          </div>
+        </div>
+        <div className="lf-bottom">
+          <span>MIT License</span>
+          <span>Built to <em>see</em> how rate limiting actually works</span>
+        </div>
       </footer>
     </div>
   );
